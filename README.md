@@ -7,4 +7,8 @@ automate sales tax for California businesses using shopify
 3. Make sure all files are in the same directory
 4. run the script
 
-Note that the schedule A spreadsheet and tax rates spreadsheet provided may not be up to date!
+The provided tax rates excel file and scheduleA workbook may not be up to date, if that is the case, then do the following: 
+* Download the tax rates excel file from CDTFA
+* Download a schedule A workbook from CDTFA
+
+

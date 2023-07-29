@@ -1,19 +1,19 @@
 """
-1. Download q# shopify orders
-2. Download q# shopify tax report (removed in future update)
-3. Download q# shopify billings
-4. Download schedule A spreadsheet from CDTFA
-5. Download tax rates spreadsheet from CDTFA
+1. Download q# shopify orders -> rename to "orders-20##-q#.csv"
+2. Download q# shopify tax report (no longer provided by shopify and also unnecessary) -> rename to "taxes-20##-q#.csv"
+3. Download q# shopify billings (not used) 
+4. Download schedule A spreadsheet from CDTFA -> rename to "schedulaA.xlsx"
+5. Download tax rates spreadsheet from CDTFA -> rename to "tax-rates.xlsx"
+6. Note that the output schedule A workbook must be opened and saved in excel (web).
 """
 
 """
-Possible refactors for contributors
+Possible refactors and bug fixes for contributors
 * replace multiple read_csv() calls in ReportBuilder with a single dataframe, unless df is being modified
 * remove any usage of tax_file, we only used it for reference
 * move counties dict to the ReportBuilder class
 * in the generate_schedula_A method, reduce the loops over orders into a single loop 
-* using shipping costs rather than shipping collected might be wrong, but it is closer to 
-	shopify's calculations than shipping collected for some reason
+* BUG: the last 9 rows are not being written onto the scheduleA file! 
 """
 
 import os
@@ -33,7 +33,7 @@ counties = dict()
 
 orders_file = './orders-2023-q1.csv'
 taxes_file = './taxes-2023-q1.csv'
-billing_file = './billing-2023-q1.csv'
+#billing_file = './billing-2023-q1.csv'
 city_to_county_excel = './tax-rates.xlsx'
 scheduleA_file = './scheduleA.xlsx'
 
@@ -41,14 +41,16 @@ def create_city_to_county_csv():
 	df = pd.read_excel(city_to_county_excel)
 
 	#print(df.columns.tolist())	
-	column_labels = {'Unnamed: 0': 'City', 'Unnamed: 1': 'Rate', 'Unnamed: 2': 'County', 'Unnamed: 3': 'Column'}
-	df = df.rename(columns=column_labels).drop('Column', axis=1)
+	new_labels = ['City', 'Rate', 'County', 'Column']
+	for i, label in enumerate(new_labels):
+		df.columns.values[i] = label
 
-	# pandas rows are -2 from libreoffice (-1 for column labels (row 1) and -1 for 0-indexing)
+	# pandas rows are -2 from libreoffice (-1 for column labels (row 1) and -1 because of 0-indexing)
 	sorted_df = df.sort_values('County', ascending=True)
 	
 	if os.path.exists('./formatted-city-to-county.csv'):
 		os.remove('./formatted-city-to-county.csv')
+
 	with open('formatted-city-to-county.csv', 'w', newline='') as f:
 		writer = csv.writer(f)
 		writer.writerow(['City', 'County'])
@@ -136,9 +138,12 @@ class Order:
 		else: 
 			self.district = District.UNINCORPORATED
 
-	def assign_subtotal(self, sub):
-		self.subtotal = sub
+	def set_subtotal_taxable(self, sub):
+		self.subtotal_taxable = sub
   
+	def set_subtotal_nontaxable(self, sub):
+		self.subtotal_nontaxable = sub
+
 	def __repr__(self):
 		return f"({self.number} | {self.city} : {self.county}) : {self.district}\n"
 
@@ -170,15 +175,25 @@ class ReportBuilder:
   
 		# sales tax collected from customers
 		taxes_df = pd.read_csv(taxes_file)
-		taxes_df = taxes_df[taxes_df['Destination State'] == 'California']
+		#taxes_df = taxes_df[taxes_df['Destination State'] == 'California']
+		taxes_df = taxes_df[taxes_df['Region'] == 'California']
 		taxes_df = taxes_df[taxes_df['Filed By Channel'] == 'Not Filed']
-		self.sales_tax = round(taxes_df['Tax Amount'].sum(), 2)
+		
+		# Shopify removed the "beta" sales tax file that was originally used. 
+		# The current one doesn't account for refunded orders, but does for "returns" (which are different?) for some reason.
+		# I can't wait for this script to get broken again when shopify decides to FUCK something up
+		numbers = [_order.number for _order in self.orders]
+		taxes_df = taxes_df[taxes_df['Order'].isin(numbers)]
+		taxes_df = taxes_df[taxes_df['Sale type'] == 'order']
+		#self.sales_tax = round(taxes_df['Tax Amount'].sum(), 2)
+		self.sales_tax = round(taxes_df['Amount'].sum(), 2)
   
 		# sales tax calculated from order history (should be the same as sales tax from shopify tax report)
 		cali_df = df[df['Shipping Province'] == 'CA']
 		self._sales_tax = 0.0
 		# to account for possible marketplace orders, use self.orders which contains no marketplace order
 		for order in self.orders: self._sales_tax += cali_df[cali_df['Name'] == order.number]['Taxes'].sum() # we can use sum() here because orders are unique in the sheet
+		self._sales_tax = round(self._sales_tax, 2)
   
 		# net interstate sales
 		# add taxes to account for marketplace orders where the tax is non-zero regardless of state (but already filed)
@@ -187,16 +202,16 @@ class ReportBuilder:
                                 - interstate_df['Refunded Amount'].sum()
                                 - interstate_df['Shipping'].sum(), 2)
 	
-		# net nontaxable sales within california
+		# net sales in California that do not include ANY taxable goods
 		non_taxable_cali_df = cali_df[cali_df['Taxes'] == 0]
-		# we use this specific formula because discounts may or may not be applied to 'Total'
-		# so calculating in terms of Subtotal will be very inefficient because we have to check for discounts
+		# use this formula because discounts may or may not be applied to 'Total'
 		self.non_taxable_california = round(non_taxable_cali_df['Total'].sum() 
                                       - non_taxable_cali_df['Refunded Amount'].sum()
                                       - non_taxable_cali_df['Shipping'].sum(), 2)
 		# querying for Taxes == 0 will omit marketplace orders to california, so add them back in 
 		market_cali_df = taxes_df[taxes_df['Filed By Channel'] == 'Filed']
-		market_cali_df = market_cali_df[market_cali_df['Destination State'] == 'California']
+		#market_cali_df = market_cali_df[market_cali_df['Destination State'] == 'California']
+		market_cali_df = market_cali_df[market_cali_df['Region'] == 'California']
 		for num in market_cali_df['Order']:
 			subset = cali_df[cali_df['Name'] == num]
 			# sum() is ok to use because unique orders in the orders sheet
@@ -204,9 +219,9 @@ class ReportBuilder:
 												- subset['Refunded Amount'].sum()
 												- subset['Shipping'].sum())
   
-		# taxable income for sufficiently small businesses are just the taxable sales from california
-		self.non_taxable = round(self.interstate_sales + self.total_shipping + self.sales_tax + self.non_taxable_california, 2)
-		self.taxable_income = round(self.gross - self.non_taxable, 2)
+		# this doesn't account for sales containing taxable and nontaxable goods
+		#self.non_taxable = round(self.interstate_sales + self.total_shipping + self._sales_tax + self.non_taxable_california, 2)
+		#self.taxable_income = round(self.gross - self.non_taxable, 2)
 		
 		# print report
 		print("===========================================")
@@ -215,29 +230,65 @@ class ReportBuilder:
 		print(f"TOTAL SHIPPING COLLECTED: {self.total_shipping}")
 		print(f"SALES TAX FROM ORDERS: {self._sales_tax}")
 		print(f"SALES TAX FROM TAX REPORT: {self.sales_tax}")
-		print(f"NONTAXABLE CALIFORNIA: {self.non_taxable_california}")
-		print(f"NONTAXABLE INCOME: {self.non_taxable}")
-		print(f"TAXABLE INCOME: {self.taxable_income}")
+		#print(f"NONTAXABLE CALIFORNIA: {self.non_taxable_california}")
+		#print(f"NONTAXABLE INCOME: {self.non_taxable}")
+		#print(f"TAXABLE INCOME: {self.taxable_income}")
 		print("===========================================")
-  
-	def generate_schedule_A(self):
+	
+	def find_nontaxable(self):
 		df = pd.read_csv(orders_file)
 		#df = df[df['Fulfillment Status'] == 'fulfilled'] unnecessary because we already filtered this out when fetching orders
 		df = df[df['Shipping Province'] == 'CA']
-		self.cali_subtotal = 0.0
+		self.california_nontaxable = 0.0
+		self.california_taxable = 0.0
 		print(len(self.orders))
+
 		for order in self.orders:
+			taxes_df = pd.read_csv(taxes_file)
+			taxes_df = taxes_df[taxes_df['Order'] == order.number]
+			taxes_df.drop_duplicates(subset='Variant', inplace=True)
+
+			# a single taxable item will be listed as many times as there are county/city rates, so remove duplicates
+			# this is so horribly inefficient but I don't even want to do this anymore
+			taxes_df_clean = taxes_df.copy()
+			for index, row in taxes_df.iterrows():
+				if type(row['Variant']) is float:
+					mask = (taxes_df_clean['Product'].duplicated(keep='first')) & (taxes_df_clean['Product'] == row['Product'])
+					taxes_df_clean.drop(taxes_df_clean[mask].index, inplace=True)
+				
+			taxes_df = taxes_df_clean
+			""" DEBUG
+			for index, row in taxes_df.iterrows():
+				print(f"{row['Order']} : ({row['Product']}, {row['Variant']}) : value = {row['Amount'] / row['Rate']}")
+			"""
+			if not taxes_df.empty:
+				taxable_amount = 0.0
+				for index, row in taxes_df.iterrows(): 
+					# ok we're getting really weird results because of rounding to the nearest cent
+					# cannot fix this without accessing orders with the shopify api
+					taxable_amount += row['Amount'] / row['Rate']
+				order.set_subtotal_taxable(taxable_amount)
+				self.california_taxable += taxable_amount
+
 			subset = df[df['Name'] == order.number]
 			if not subset.empty: 
 				sub = subset.iloc[0]
 				#print(f"sub shape: {subset.shape[0]}")
-				amount = sub['Total'] - sub['Shipping'] - sub['Refunded Amount'] - sub['Taxes']
-				self.cali_subtotal += amount
-				order.assign_subtotal(amount)
+				nontax_amount = sub['Total'] - sub['Shipping'] - sub['Refunded Amount'] - sub['Taxes'] - order.subtotal_taxable
+				order.set_subtotal_nontaxable(nontax_amount)
+				self.california_nontaxable += nontax_amount
 			else: print(f"ERROR: cannot find the subtotal for taxable order: {order.number}")
-		self.cali_subtotal = round(self.cali_subtotal, 2)
-		print(f"California Subtotal (Taxable Income): {self.cali_subtotal}")
-  
+
+		self.california_nontaxable = round(self.california_nontaxable, 2)
+		self.california_taxable = round(self.california_taxable, 2)
+		# self.californian_nontaxable => nontaxable amount from taxed sales
+		# self.non_taxable_california => amount from nontaxed sales 
+		print(f"California Nontaxable Income: {self.california_nontaxable + self.non_taxable_california}")
+		print(f"California Taxable Income: {self.california_taxable}")
+
+	def generate_schedule_A(self):
+		df = pd.read_csv(orders_file)
+		df = df[df['Shipping Province'] == 'CA'] 
 		xls = pd.ExcelFile(scheduleA_file)
 		sheets = xls.sheet_names
 		schedule_df = pd.read_excel(scheduleA_file, sheet_name=sheets[0], engine='openpyxl')
@@ -249,24 +300,24 @@ class ReportBuilder:
 		for order in self.orders:
 			if order.district == District.CITY:
 				if order.city not in self.district_taxes: self.district_taxes[order.city] = 0.0
-				self.district_taxes[order.city] += order.subtotal
+				self.district_taxes[order.city]  += order.subtotal_taxable
 				index = schedule_df.index[schedule_df['City'].notna() & schedule_df['City'].str.contains(order.city, case=False)].to_list()
 				if index: 
 					index = index[0]
-					schedule_df.at[index, 'Tax Amount'] += order.subtotal
+					schedule_df.at[index, 'Tax Amount']  += order.subtotal_taxable
 				else: print(f"ERROR: cannot find {order.city}: {order.county} county in the scheulde A workbook")
 			elif order.district == District.UNINCORPORATED:
 				if order.county not in self.district_taxes: self.district_taxes[order.county] = 0.0
-				self.district_taxes[order.county] += order.subtotal
+				self.district_taxes[order.county]  += order.subtotal_taxable
 				index = schedule_df.index[schedule_df['City'].notna() & schedule_df['City'].str.contains('{} county'.format(order.county), case=False)].to_list()
 				if index: 
 					index = index[0]
-					schedule_df.at[index, 'Tax Amount'] += order.subtotal
+					schedule_df.at[index, 'Tax Amount']  += order.subtotal_taxable
 				else:
 					index = schedule_df.index[schedule_df['City'].notna() & schedule_df['City'].str.contains('{} county unincorporated area'.format(order.county), case=False)].to_list()
 					if index: 
 						index = index[0]
-						schedule_df.at[index, 'Tax Amount'] += order.subtotal
+						schedule_df.at[index, 'Tax Amount']  += order.subtotal_taxable
 					else: print(f"ERROR: cannot find unincorporated: {order.city}, {order.county} county in schedule A")
 			else: print(f"ERROR: Order {order.number} has not been assigned a district")
 
@@ -288,11 +339,11 @@ class ReportBuilder:
 		sheet.cell(row=4, column=schedule_df.columns.get_loc('Rows') + 1).value += self.taxable_income 
 		wb.save("scheduleA_temp_1.xlsx")	
   	
-			
 create_city_to_county_csv()
 create_counties()
 
 builder = ReportBuilder()
 builder.fetch_orders()
 builder.make_report()
+builder.find_nontaxable()
 builder.generate_schedule_A()
