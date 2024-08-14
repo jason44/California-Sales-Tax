@@ -132,8 +132,11 @@ class Order:
 					for i in len(index):
 						print(f"Do you mean: {index['City'].iloc[i]} : {index['County'].iloc[i]}")
 		
+		# if the county is unknown (eg: the 'City' is an Air force base or is misspelled), assign a default case
+		if self.county == 'UNKNOWN':
+			self.district = District.BLANK 
 		# check if the city has its own district tax (on top of the county tax)
-		if self.city in counties[self.county]:
+		elif self.city in counties[self.county]:
 			self.district = District.CITY
 		else: 
 			self.district = District.UNINCORPORATED
@@ -181,7 +184,6 @@ class ReportBuilder:
 		
 		# Shopify removed the "beta" sales tax file that was originally used. 
 		# The current one doesn't account for refunded orders, but does for "returns" (which are different?) for some reason.
-		# I can't wait for this script to get broken again when shopify decides to FUCK something up
 		numbers = [_order.number for _order in self.orders]
 		taxes_df = taxes_df[taxes_df['Order'].isin(numbers)]
 		taxes_df = taxes_df[taxes_df['Sale type'] == 'order']
@@ -318,8 +320,22 @@ class ReportBuilder:
 					if index: 
 						index = index[0]
 						schedule_df.at[index, 'Tax Amount']  += order.subtotal_taxable
-					else: print(f"ERROR: cannot find unincorporated: {order.city}, {order.county} county in schedule A")
-			else: print(f"ERROR: Order {order.number} has not been assigned a district")
+					else: 
+						index = schedule_df.index[schedule_df['City'].notna() & schedule_df['City'].str.contains('{}'.format(order.county), case=False)].to_list()
+						if index: 
+							index = index[0]
+							schedule_df.at[index, 'Tax Amount']  += order.subtotal_taxable
+						else: print(f"ERROR: cannot find unincorporated: {order.city}, {order.county} county in schedule A, order number: {order.number}")
+			else: 
+				# UNKNOWN DISTRICT, default to LA county
+				if 'unknown' not in self.district_taxes: self.district_taxes['unknown'] = 0.0
+				self.district_taxes['unknown']  += order.subtotal_taxable
+				index = schedule_df.index[schedule_df['City'].notna() & schedule_df['City'].str.contains('los angeles county', case=False)].to_list()
+				if index: 
+					index = index[0]
+					schedule_df.at[index, 'Tax Amount']  += order.subtotal_taxable
+				else: print(f"ERROR: this error should not appear!")
+				#print(f"ERROR: Order {order.number} has not been assigned a district")
 
 		for key in self.district_taxes.keys(): self.district_taxes[key] = round(self.district_taxes[key], 2)
 		for key, value in self.district_taxes.items(): print(f"{key}: {value}")
@@ -336,7 +352,8 @@ class ReportBuilder:
 		print("Saving workbook...")
 		for i, index in enumerate(look_df, 9):
 			sheet.cell(row=i, column=tax_col + 1).value = index
-		sheet.cell(row=4, column=schedule_df.columns.get_loc('Rows') + 1).value += self.taxable_income 
+		#sheet.cell(row=4, column=schedule_df.columns.get_loc('Rows') + 1).value += self.taxable_income 
+		sheet.cell(row=4, column=schedule_df.columns.get_loc('Rows') + 1).value += self.california_taxable 
 		wb.save("scheduleA_temp_1.xlsx")	
   	
 create_city_to_county_csv()
